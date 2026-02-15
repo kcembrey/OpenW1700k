@@ -19,7 +19,6 @@ Link: https://lore.kernel.org/r/20250109131313.32317-1-ansuelsmth@gmail.com
 Signed-off-by: Ulf Hansson <ulf.hansson@linaro.org>
 ---
  drivers/pmdomain/mediatek/Kconfig             |  12 ++
- drivers/pmdomain/mediatek/Makefile            |   1 +
  .../pmdomain/mediatek/airoha-cpu-pmdomain.c   | 342 ++++++++++++++++++
  3 files changed, 355 insertions(+)
  create mode 100644 drivers/pmdomain/mediatek/airoha-cpu-pmdomain.c
@@ -44,30 +43,28 @@ Signed-off-by: Ulf Hansson <ulf.hansson@linaro.org>
 +
  menu "MediaTek SoC drivers"
  	depends on ARCH_MEDIATEK || COMPILE_TEST
-
---- a/drivers/pmdomain/mediatek/Makefile
-+++ b/drivers/pmdomain/mediatek/Makefile
-@@ -1,3 +1,4 @@
- # SPDX-License-Identifier: GPL-2.0-only
- obj-$(CONFIG_MTK_SCPSYS)		+= mtk-scpsys.o
- obj-$(CONFIG_MTK_SCPSYS_PM_DOMAINS) 	+= mtk-pm-domains.o
-+obj-$(CONFIG_AIROHA_CPU_PM_DOMAIN) 	+= airoha-cpu-pmdomain.o
---- /dev/null
+ 
+--- a/drivers/pmdomain/mediatek/airoha-cpu-pmdomain.c
 +++ b/drivers/pmdomain/mediatek/airoha-cpu-pmdomain.c
-@@ -0,0 +1,342 @@
-+// SPDX-License-Identifier: GPL-2.0
-+
-+#include <linux/arm-smccc.h>
-+#include <linux/bitfield.h>
-+#include <linux/clk-provider.h>
+@@ -3,22 +3,52 @@
+ #include <linux/arm-smccc.h>
+ #include <linux/bitfield.h>
+ #include <linux/clk-provider.h>
 +#include <linux/delay.h>
 +#include <linux/io.h>
-+#include <linux/module.h>
+ #include <linux/module.h>
 +#include <linux/of.h>
-+#include <linux/platform_device.h>
-+#include <linux/pm_domain.h>
-+#include <linux/slab.h>
-+
+ #include <linux/platform_device.h>
+ #include <linux/pm_domain.h>
+ #include <linux/slab.h>
+ 
+-#define AIROHA_SIP_AVS_HANDLE			0x82000301
+-#define AIROHA_AVS_OP_BASE			0xddddddd0
+-#define AIROHA_AVS_OP_MASK			GENMASK(1, 0)
+-#define AIROHA_AVS_OP_FREQ_DYN_ADJ		(AIROHA_AVS_OP_BASE | \
+-						 FIELD_PREP(AIROHA_AVS_OP_MASK, 0x1))
+-#define AIROHA_AVS_OP_GET_FREQ			(AIROHA_AVS_OP_BASE | \
+-						 FIELD_PREP(AIROHA_AVS_OP_MASK, 0x2))
 +/* ATF SMC interface for CPU frequency control */
 +#define AIROHA_SIP_AVS_HANDLE		0x82000301
 +#define AIROHA_AVS_OP_BASE		0xddddddd0
@@ -98,31 +95,33 @@ Signed-off-by: Ulf Hansson <ulf.hansson@linaro.org>
 +#define MCUCFG_CK_SEL_MASK		GENMASK(10, 9)
 +#define MCUCFG_CK_SEL_ARMPLL		1
 +#define MCUCFG_CK_SEL_PLL2		3
-+
-+struct airoha_cpu_pmdomain_priv {
-+	struct clk_hw hw;
-+	struct generic_pm_domain pd;
+ 
+ struct airoha_cpu_pmdomain_priv {
+ 	struct clk_hw hw;
+ 	struct generic_pm_domain pd;
 +	bool use_smc;
 +	/* Direct PLL registers (used when use_smc = false) */
 +	void __iomem *pll_base;
 +	void __iomem *mcucfg;
-+};
-+
-+static long airoha_cpu_pmdomain_clk_round(struct clk_hw *hw,
-+					   unsigned long rate,
-+					   unsigned long *parent_rate)
-+{
-+	return rate;
-+}
-+
+ };
+ 
+ static int airoha_cpu_pmdomain_clk_determine_rate(struct clk_hw *hw,
+@@ -27,19 +57,44 @@ static int airoha_cpu_pmdomain_clk_deter
+ 	return 0;
+ }
+ 
+-static unsigned long airoha_cpu_pmdomain_clk_get(struct clk_hw *hw,
+-						 unsigned long parent_rate)
 +/* Read current CPU frequency via SMC */
 +static unsigned long airoha_cpu_smc_clk_get(void)
-+{
-+	struct arm_smccc_res res;
-+
-+	arm_smccc_1_1_invoke(AIROHA_SIP_AVS_HANDLE, AIROHA_AVS_OP_GET_FREQ,
-+			     0, 0, 0, 0, 0, 0, &res);
-+
+ {
+ 	struct arm_smccc_res res;
+ 
+ 	arm_smccc_1_1_invoke(AIROHA_SIP_AVS_HANDLE, AIROHA_AVS_OP_GET_FREQ,
+ 			     0, 0, 0, 0, 0, 0, &res);
+ 
+-	/* SMCCC returns freq in MHz */
+-	return (int)(res.a0 * 1000 * 1000);
 +	return (unsigned long)(res.a0 * 1000 * 1000);
 +}
 +
@@ -151,30 +150,30 @@ Signed-off-by: Ulf Hansson <ulf.hansson@linaro.org>
 +		return airoha_cpu_smc_clk_get();
 +
 +	return airoha_cpu_pll_clk_get(priv);
-+}
-+
-+static int airoha_cpu_pmdomain_clk_is_enabled(struct clk_hw *hw)
-+{
-+	return true;
-+}
-+
-+static const struct clk_ops airoha_cpu_pmdomain_clk_ops = {
-+	.recalc_rate = airoha_cpu_pmdomain_clk_get,
-+	.is_enabled = airoha_cpu_pmdomain_clk_is_enabled,
-+	.round_rate = airoha_cpu_pmdomain_clk_round,
-+};
-+
+ }
+ 
+-/* Airoha CPU clk SMCC is always enabled */
+ static int airoha_cpu_pmdomain_clk_is_enabled(struct clk_hw *hw)
+ {
+ 	return true;
+@@ -51,18 +106,135 @@ static const struct clk_ops airoha_cpu_p
+ 	.determine_rate = airoha_cpu_pmdomain_clk_determine_rate,
+ };
+ 
+-static int airoha_cpu_pmdomain_set_performance_state(struct generic_pm_domain *domain,
+-						     unsigned int state)
 +/* Set CPU frequency via SMC */
 +static int airoha_cpu_smc_set_freq(unsigned int state)
-+{
-+	struct arm_smccc_res res;
-+
-+	arm_smccc_1_1_invoke(AIROHA_SIP_AVS_HANDLE, AIROHA_AVS_OP_FREQ_DYN_ADJ,
-+			     0, state, 0, 0, 0, 0, &res);
-+
-+	return res.a0 & BIT(0) ? -EINVAL : 0;
-+}
-+
+ {
+ 	struct arm_smccc_res res;
+ 
+ 	arm_smccc_1_1_invoke(AIROHA_SIP_AVS_HANDLE, AIROHA_AVS_OP_FREQ_DYN_ADJ,
+ 			     0, state, 0, 0, 0, 0, &res);
+ 
+-	/* SMC signal correct apply by unsetting BIT 0 */
+ 	return res.a0 & BIT(0) ? -EINVAL : 0;
+ }
+ 
 +/*
 + * Switch CPU clock source via CLK_MUX and MCUCFG registers.
 + * Matches ATF BL31 clock_switch() sequence.
@@ -293,23 +292,25 @@ Signed-off-by: Ulf Hansson <ulf.hansson@linaro.org>
 +	return res.a0 > 0 && res.a0 < 2000;
 +}
 +
-+static int airoha_cpu_pmdomain_probe(struct platform_device *pdev)
-+{
-+	struct airoha_cpu_pmdomain_priv *priv;
-+	struct device *dev = &pdev->dev;
-+	const struct clk_init_data init = {
-+		.name = "cpu",
-+		.ops = &airoha_cpu_pmdomain_clk_ops,
-+		.flags = CLK_GET_RATE_NOCACHE,
-+	};
-+	struct generic_pm_domain *pd;
+ static int airoha_cpu_pmdomain_probe(struct platform_device *pdev)
+ {
+ 	struct airoha_cpu_pmdomain_priv *priv;
+@@ -70,18 +242,45 @@ static int airoha_cpu_pmdomain_probe(str
+ 	const struct clk_init_data init = {
+ 		.name = "cpu",
+ 		.ops = &airoha_cpu_pmdomain_clk_ops,
+-		/* Clock with no set_rate, can't cache */
+ 		.flags = CLK_GET_RATE_NOCACHE,
+ 	};
+ 	struct generic_pm_domain *pd;
 +	unsigned long freq_hz;
-+	int ret;
-+
-+	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
-+	if (!priv)
-+		return -ENOMEM;
-+
+ 	int ret;
+ 
+ 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+ 	if (!priv)
+ 		return -ENOMEM;
+ 
+-	/* Init and register a get-only clk for Cpufreq */
 +	/* Try ATF SMC first */
 +	if (airoha_cpu_smc_available()) {
 +		priv->use_smc = true;
@@ -332,68 +333,26 @@ Signed-off-by: Ulf Hansson <ulf.hansson@linaro.org>
 +	}
 +
 +	/* Read and verify current frequency */
-+	priv->hw.init = &init;
+ 	priv->hw.init = &init;
 +	freq_hz = airoha_cpu_pmdomain_clk_get(&priv->hw, 0);
 +	if (!freq_hz || freq_hz > 2000000000UL)
 +		return dev_err_probe(dev, -ENODEV,
 +				     "invalid CPU frequency: %lu Hz\n", freq_hz);
 +
 +	dev_info(dev, "CPU frequency: %lu MHz\n", freq_hz / 1000000);
-+
-+	ret = devm_clk_hw_register(dev, &priv->hw);
-+	if (ret)
-+		return ret;
-+
-+	ret = devm_of_clk_add_hw_provider(dev, of_clk_hw_simple_get,
-+					  &priv->hw);
-+	if (ret)
-+		return ret;
-+
-+	pd = &priv->pd;
-+	pd->name = "cpu_pd";
-+	pd->flags = GENPD_FLAG_ALWAYS_ON;
-+	pd->set_performance_state = airoha_cpu_pmdomain_set_performance_state;
-+
-+	ret = pm_genpd_init(pd, NULL, false);
-+	if (ret)
-+		return ret;
-+
-+	ret = of_genpd_add_provider_simple(dev->of_node, pd);
-+	if (ret)
-+		goto err_add_provider;
-+
-+	platform_set_drvdata(pdev, priv);
-+	return 0;
-+
-+err_add_provider:
-+	pm_genpd_remove(pd);
-+	return ret;
-+}
-+
-+static void airoha_cpu_pmdomain_remove(struct platform_device *pdev)
-+{
-+	struct airoha_cpu_pmdomain_priv *priv = platform_get_drvdata(pdev);
-+
-+	of_genpd_del_provider(pdev->dev.of_node);
-+	pm_genpd_remove(&priv->pd);
-+}
-+
-+static const struct of_device_id airoha_cpu_pmdomain_of_match[] = {
-+	{ .compatible = "airoha,en7581-cpufreq" },
-+	{ },
-+};
-+MODULE_DEVICE_TABLE(of, airoha_cpu_pmdomain_of_match);
-+
-+static struct platform_driver airoha_cpu_pmdomain_driver = {
-+	.probe = airoha_cpu_pmdomain_probe,
-+	.remove_new = airoha_cpu_pmdomain_remove,
-+	.driver = {
-+		.name = "airoha-cpu-pmdomain",
-+		.of_match_table = airoha_cpu_pmdomain_of_match,
-+	},
-+};
-+module_platform_driver(airoha_cpu_pmdomain_driver);
-+
-+MODULE_AUTHOR("Christian Marangi <ansuelsmth@gmail.com>");
-+MODULE_DESCRIPTION("CPU PM domain driver for Airoha SoCs");
-+MODULE_LICENSE("GPL");
+ 	ret = devm_clk_hw_register(dev, &priv->hw);
+ 	if (ret)
+ 		return ret;
+@@ -106,12 +305,10 @@ static int airoha_cpu_pmdomain_probe(str
+ 		goto err_add_provider;
+ 
+ 	platform_set_drvdata(pdev, priv);
+-
+ 	return 0;
+ 
+ err_add_provider:
+ 	pm_genpd_remove(pd);
+-
+ 	return ret;
+ }
+ 
