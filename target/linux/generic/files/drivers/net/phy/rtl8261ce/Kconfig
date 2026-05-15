@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config RTL8261CE_PHY
+	tristate "Realtek RTL8261CE PHY"
+	help
+	  Supports the Realtek RTL8261CE 10GBASE-T PHY using the vendor
+	  initialisation sequence recovered from rtk-rtl8261ce-phy.ko.
